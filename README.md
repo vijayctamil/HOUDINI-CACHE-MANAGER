@@ -38,7 +38,7 @@ pip install PySide6
 ### 2. ▶️ Run the tool:
 
 ```bash
-python fx_cache_test_v008.py
+python Houdini_Cache_Manager.py
 ```
 
 > 💡 By default, it scans caches under `C:/Houdini_Caches`. You can change this using the **"Select Cache Folder"** button inside the app.
