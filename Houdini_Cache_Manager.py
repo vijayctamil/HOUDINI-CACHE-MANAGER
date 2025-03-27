@@ -66,23 +66,30 @@ class FXCacheManager(QWidget):
         self.list_existing_folders()
 
     def list_existing_folders(self):
-        """Lists only the deepest cache folders containing selected file types."""
+        """Lists only cache layer folders that contain version subfolders (v1, v2, etc.)."""
         self.folder_list.clear()
         selected_ext = self.filter_dropdown.currentText()
-        cache_folders = set()
-        
+        valid_folders = set()
+
         if not os.path.exists(CACHE_DIR):
             os.makedirs(CACHE_DIR)
-        
+
         for root, dirs, files in os.walk(CACHE_DIR):
-            if any(file.endswith(selected_ext) or selected_ext == "All" for file in files):
-                cache_folders.add(root.replace(CACHE_DIR, "").strip("\\"))
-        
-        for folder in sorted(cache_folders):
+            for subdir in dirs:
+                if re.match(r"v\d+$", subdir):  # version folders
+                    full_path = os.path.join(root, subdir)
+                    if any(
+                        f.endswith(selected_ext) or selected_ext == "All"
+                        for f in os.listdir(full_path)
+                    ):
+                        rel_path = os.path.relpath(root, CACHE_DIR)
+                        valid_folders.add(rel_path)
+
+        for folder in sorted(valid_folders):
             self.folder_list.addItem(folder)
 
     def list_cache_files(self, item):
-        """Lists frame ranges from the deepest cache folder."""
+        """Lists all frame ranges grouped under selected render layer (e.g., OCEAN_FOAM)."""
         selected_folder = os.path.join(CACHE_DIR, item.text())
         self.cache_list.clear()
         frame_sequences = self.group_frames_by_range(selected_folder)
@@ -90,33 +97,51 @@ class FXCacheManager(QWidget):
             self.cache_list.addItem(seq)
 
     def group_frames_by_range(self, folder):
-        """Groups frames into frame ranges and organizes them by version & layer."""
+        """Groups cache files by version based on naming convention: name_vX.####.ext."""
         frame_dict = {}
-        latest_versions = {}
-        
+        version_nums = {}
+
         for root, _, files in os.walk(folder):
-            for file in files:
-                if file.endswith((".bgeo.sc", ".vdb", ".abc")):
+            path_parts = os.path.relpath(root, folder).split(os.sep)
+            version = next((p for p in reversed(path_parts) if re.match(r"v\d+$", p)), None)
+
+            if version:
+                version_num = int(version[1:])
+                for file in files:
                     match = re.match(r"(.+?)_(v\d+)\.(\d+)\.(bgeo\.sc|vdb|abc)$", file)
                     if match:
-                        base_name, version, frame, ext = match.groups()
+                        base_name, file_version, frame, ext = match.groups()
                         frame = int(frame)
-                        key = f"{base_name} ({version}).{ext}"
+
+                        key = f"{base_name} ({file_version}).{ext}"
                         if key not in frame_dict:
                             frame_dict[key] = []
                         frame_dict[key].append(frame)
-                        latest_versions[base_name] = max(latest_versions.get(base_name, version), version)
-        
+
+                        # Track highest version number for each base_name
+                        if base_name not in version_nums:
+                            version_nums[base_name] = version_num
+                        else:
+                            version_nums[base_name] = max(version_nums[base_name], version_num)
+
         frame_ranges = []
         for key, frames in frame_dict.items():
             frames.sort()
             base_name = key.split(" (")[0]
-            latest_tag = " [LATEST]" if latest_versions[base_name] in key else ""
+            ext = key.split(".")[-1]
+            version = re.search(r"\((v\d+)\)", key).group(1)
+            version_num = int(version[1:])
+
+            latest_tag = " [LATEST]" if version_num == version_nums.get(base_name, -1) else ""
             frame_ranges.append(f"{key} ({frames[0]}-{frames[-1]}){latest_tag}")
+
         return frame_ranges
 
+
+
+
     def delete_old_versions(self):
-        """Deletes old versions of caches, keeping only the latest version."""
+        """Deletes old versions of caches, keeping only the latest version per base name."""
         selected_folder = self.folder_list.currentItem()
         if not selected_folder:
             return
@@ -124,38 +149,61 @@ class FXCacheManager(QWidget):
         cache_folder = os.path.join(CACHE_DIR, selected_folder.text())
         latest_versions = {}
 
+        # First pass: determine latest version per base_name
         for root, _, files in os.walk(cache_folder):
             for file in files:
                 match = re.match(r"(.+?)_(v\d+)\.(\d+)\.(bgeo\.sc|vdb|abc)$", file)
                 if match:
                     base_name, version, _, _ = match.groups()
-                    latest_versions[base_name] = max(latest_versions.get(base_name, version), version)
+                    version_num = int(version[1:])
+                    if base_name not in latest_versions or version_num > latest_versions[base_name]:
+                        latest_versions[base_name] = version_num
 
+        # Second pass: delete files that are not the latest
         for root, _, files in os.walk(cache_folder):
             for file in files:
                 match = re.match(r"(.+?)_(v\d+)\.(\d+)\.(bgeo\.sc|vdb|abc)$", file)
                 if match:
                     base_name, version, _, _ = match.groups()
-                    if version != latest_versions[base_name]:
-                        os.remove(os.path.join(root, file))
+                    version_num = int(version[1:])
+                    if version_num < latest_versions.get(base_name, -1):
+                        file_path = os.path.join(root, file)
+                        print(f"Deleting old cache: {file_path}")
+                        os.remove(file_path)
+
+        # Third pass: remove empty version folders
+        for root, dirs, _ in os.walk(cache_folder, topdown=False):
+            for d in dirs:
+                dir_path = os.path.join(root, d)
+                if re.match(r"v\d+$", d) and not os.listdir(dir_path):
+                    print(f"Removing empty folder: {dir_path}")
+                    os.rmdir(dir_path)
 
         self.list_cache_files(selected_folder)
+
     
     def display_cache_metadata(self, item):
-        """Displays metadata for the selected cache."""
+        """Displays metadata for the selected cache (based on version folder)."""
         selected_folder = self.folder_list.currentItem()
         if not selected_folder:
             return
-        
-        cache_folder = os.path.join(CACHE_DIR, selected_folder.text())
-        cache_name = item.text().split(" (")[0]  # Extract base name
+
+        render_layer_folder = os.path.join(CACHE_DIR, selected_folder.text())
+        cache_info = item.text().split(" (")[0]  # Base cache name
+        version = re.search(r"\((v\d+)\)", item.text())
+        if not version:
+            return
+
+        version_folder = version.group(1)
+        full_version_path = os.path.join(render_layer_folder, version_folder)
+
         total_size = 0
         frame_count = 0
         last_modified = None
 
-        for root, _, files in os.walk(cache_folder):
+        for root, _, files in os.walk(full_version_path):
             for file in files:
-                if file.startswith(cache_name) and file.endswith((".bgeo.sc", ".vdb", ".abc")):
+                if file.startswith(cache_info) and file.endswith((".bgeo.sc", ".vdb", ".abc")):
                     file_path = os.path.join(root, file)
                     total_size += os.path.getsize(file_path)
                     frame_count += 1
@@ -163,7 +211,7 @@ class FXCacheManager(QWidget):
                     if last_modified is None or mod_time > last_modified:
                         last_modified = mod_time
 
-        size_mb = total_size / (1024 * 1024)  # Convert to MB
+        size_mb = total_size / (1024 * 1024)
         mod_time_str = QDateTime.fromSecsSinceEpoch(int(last_modified)).toString("yyyy-MM-dd HH:mm:ss") if last_modified else "-"
 
         self.metadata_label.setText(f"Cache Metadata:\nSize: {size_mb:.2f} MB\nFrames: {frame_count}\nModified: {mod_time_str}")
@@ -200,3 +248,4 @@ if __name__ == "__main__":
     window = FXCacheManager()
     window.show()
     sys.exit(app.exec())
+    
