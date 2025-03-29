@@ -17,6 +17,14 @@ A powerful and lightweight GUI tool to **manage, inspect, and clean up Houdini s
 
 ---
 
+---
+
+## 🎬 Watch Demo
+
+Check out the full demo on [Youtube](https://youtu.be/EcNdS6BuxVc).
+
+---
+
 ## 📦 Supported File Types
 
 - `.bgeo.sc`
